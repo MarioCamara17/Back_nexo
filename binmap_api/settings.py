@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'authentication',
     'places',
     'routes',
+    'chatbot'
 ]
 
 MIDDLEWARE = [
