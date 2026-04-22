@@ -63,7 +63,16 @@ class PlaceViewSet(viewsets.ModelViewSet):
     serializer_class = PlaceSerializer
     permission_classes = [IsAdminUserOrReadOnly]
     filter_backends = [filters.SearchFilter]
-    search_fields = ['name', 'municipality__name', 'municipality__id', 'category__name', 'category__id', 'route__name', 'route__id']
+    search_fields = [
+        'name',
+        'municipality__name',
+        'municipality__id',
+        'category__name',
+        'category__id',
+        'route__name',
+        'route__id'
+    ]
+    pagination_class = None
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def toggle_visited(self, request, pk=None):
@@ -73,18 +82,15 @@ class PlaceViewSet(viewsets.ModelViewSet):
         place = self.get_object()
         user = request.user
         
-        # Verificar si el lugar ya está marcado como visitado por este usuario
         visited = VisitedPlace.objects.filter(place=place, user=user).first()
         
         if visited:
-            # Si ya está marcado como visitado, lo eliminamos
             visited.delete()
             return Response(
-                {"message": "Lugar desmarcado como visitado correctamente"}, 
+                {"message": "Lugar desmarcado como visitado correctamente"},
                 status=status.HTTP_200_OK
             )
         else:
-            # Si no está marcado como visitado, lo marcamos
             visited_date = request.data.get('visited_date', timezone.now().date())
             notes = request.data.get('notes', '')
             
