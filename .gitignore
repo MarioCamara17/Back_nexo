@@ -173,4 +173,4 @@ cython_debug/
 
 
 # Media files
-/media/
+#/media/
