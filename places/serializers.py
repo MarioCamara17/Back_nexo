@@ -27,9 +27,16 @@ class CategorySerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+class RouteBasicSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Route
+        fields = ('id', 'name', 'description', 'duration')
+
+
 class PlaceSerializer(serializers.ModelSerializer):
     municipality = MunicipalitySerializer(read_only=True)
     category = CategorySerializer(read_only=True)
+    route = RouteBasicSerializer(read_only=True)
 
     class Meta:
         model = Place
@@ -37,6 +44,12 @@ class PlaceSerializer(serializers.ModelSerializer):
             'id',
             'name',
             'description',
+            'history',
+            'importance',
+            'recommendations',
+            'schedule',
+            'cost',
+            'tips',
             'latitude',
             'longitude',
             'image',
@@ -44,17 +57,7 @@ class PlaceSerializer(serializers.ModelSerializer):
             'municipality',
             'category',
             'route',
-            'municipality',
-            'category',
-            'route',
         )
-
-    class RouteSerializer(serializers.ModelSerializer):
-        class Meta:
-            model = Route
-            fields = ('id', 'name', 'description', 'duration')
-
-    route = RouteSerializer(read_only=True)
 
 
 class FavoriteSerializer(serializers.ModelSerializer):
