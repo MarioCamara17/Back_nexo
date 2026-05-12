@@ -27,6 +27,7 @@ urlpatterns = [
     path('api/v1/', include('authentication.urls')),
     path('api/v1/auth/token/', CustomObtainAuthToken.as_view(), name='api_token_auth'),
     path('api/', include('chatbot.urls')),
+    path('api/v1/gamification/', include('gamification.urls')),
 ]
 
 # Server static files in development server

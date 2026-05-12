@@ -8,6 +8,8 @@ from django.dispatch import receiver
 from django_rest_passwordreset.signals import reset_password_token_created
 from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.authtoken.models import Token
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+
 
 from .serializers import UserSerializer, CustomAuthTokenSerializer
 
@@ -49,16 +51,25 @@ class SignupView(APIView):
 
 class UserDetailView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get(self, request):
-        return Response(UserSerializer(request.user).data, status=status.HTTP_200_OK)
+        serializer = UserSerializer(request.user, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     def patch(self, request):
         user = request.user
-        serializer = UserSerializer(user, data=request.data, partial=True)
+        serializer = UserSerializer(
+            user,
+            data=request.data,
+            partial=True,
+            context={'request': request}
+        )
+
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data, status=status.HTTP_200_OK)
+
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
