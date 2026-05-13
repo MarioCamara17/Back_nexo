@@ -9,7 +9,12 @@ from places.views import (
     FavoriteViewSet,
     VisitedPlaceViewSet
 )
-from routes.views import RouteViewSet, MunicipalityHasRouteViewSet
+
+from routes.views import (
+    RouteViewSet,
+    MunicipalityHasRouteViewSet,
+    CustomRouteViewSet
+)
 
 router = DefaultRouter()
 
@@ -21,4 +26,5 @@ router.register(r'favorites', FavoriteViewSet, basename='favorites')
 router.register(r'visited-places', VisitedPlaceViewSet, basename='visited-places')
 
 router.register(r'routes', RouteViewSet)
-router.register(r'municipality-routes', MunicipalityHasRouteViewSet) 
+router.register(r'municipality-routes', MunicipalityHasRouteViewSet)
+router.register(r'custom-routes', CustomRouteViewSet, basename='custom-routes')
