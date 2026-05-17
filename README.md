@@ -38,7 +38,7 @@ El archivo `.env` debe contener:
 ```env
 SECRET_KEY=Tu clave secreta de django
 DEBUG=True
-ALLOWED_HOSTS=127.0.0.1
+ALLOWED_HOSTS=https://back-nexo.onrender.com
 ```
 
 Reemplaza "Tu clave secreta de django" con la clave generada en el paso anterior.

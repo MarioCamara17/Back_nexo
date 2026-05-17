@@ -83,7 +83,7 @@ class ChatbotView(APIView):
             }
 
             ollama_response = requests.post(
-                "http://127.0.0.1:11434/api/chat",
+                "http://https://back-nexo.onrender.com:11434/api/chat",
                 json=payload,
                 timeout=180
             )
