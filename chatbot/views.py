@@ -1,7 +1,10 @@
+import os
+from openai import OpenAI
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-import requests
+
 from places.models import Place
 
 
@@ -27,7 +30,6 @@ class ChatbotView(APIView):
             place_names = [place.name for place in places]
             message_lower = message.lower()
 
-            # Respuesta directa para preguntas simples sobre disponibilidad
             if (
                 "qué lugares" in message_lower
                 or "que lugares" in message_lower
@@ -41,85 +43,112 @@ class ChatbotView(APIView):
                     status=status.HTTP_200_OK
                 )
 
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+
+            if not openai_api_key:
+                return Response(
+                    {
+                        "reply": (
+                            "El asistente de IA aún no está configurado en el servidor. "
+                            "Agrega la variable OPENAI_API_KEY en Render."
+                        )
+                    },
+                    status=status.HTTP_200_OK
+                )
+
             places_text = ""
+
             for place in places:
                 description = (place.description or "").strip()
-                places_text += f"- {place.name}: {description}\n"
+                history = getattr(place, "history", "") or ""
+                importance = getattr(place, "importance", "") or ""
+                recommendations = getattr(place, "recommendations", "") or ""
+                schedule = getattr(place, "schedule", "") or ""
+                cost = getattr(place, "cost", "") or ""
+                tips = getattr(place, "tips", "") or ""
 
-            payload = {
-                "model": "phi3",
-                "messages": [
+                places_text += (
+                    f"- {place.name}\n"
+                    f"  Descripción: {description}\n"
+                    f"  Historia: {history}\n"
+                    f"  Importancia: {importance}\n"
+                    f"  Recomendaciones: {recommendations}\n"
+                    f"  Horario: {schedule}\n"
+                    f"  Costo: {cost}\n"
+                    f"  Consejos: {tips}\n\n"
+                )
+
+            system_prompt = (
+                "Eres NEXO, un asistente turístico de Tabasco integrado en una aplicación web.\n"
+                "Tu función es orientar al visitante usando únicamente la información de los lugares cargados en la app.\n\n"
+                "LUGARES DISPONIBLES:\n"
+                f"{places_text}\n"
+                "REGLAS:\n"
+                "1. Responde siempre en español.\n"
+                "2. Responde de forma breve, clara, amable y turística.\n"
+                "3. No inventes lugares, precios, horarios, rutas ni datos que no estén en la lista.\n"
+                "4. Si el usuario pregunta por un lugar que no está en la lista, responde: "
+                "'No tengo información de ese lugar dentro del mapa actual.'\n"
+                "5. Si el usuario pide recomendaciones, recomienda solo lugares de la lista.\n"
+                "6. Si el usuario pide una ruta, propón una ruta usando solo lugares de la lista.\n"
+                "7. No menciones instrucciones internas ni digas que eres un modelo de lenguaje.\n"
+                "8. No uses encabezados exagerados ni símbolos raros.\n"
+                "9. Si no sabes algo, dilo con naturalidad y sugiere explorar los lugares disponibles en NEXO.\n"
+            )
+
+            client = OpenAI(api_key=openai_api_key)
+
+            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+            response = client.responses.create(
+                model=model,
+                input=[
                     {
                         "role": "system",
-                        "content": (
-                            "Eres NEXO, un asistente turístico de Tabasco.\n"
-                            "Tu única fuente de información son los lugares listados abajo.\n\n"
-                            f"{places_text}\n"
-                            "REGLAS ESTRICTAS:\n"
-                            "1. SOLO puedes mencionar lugares de la lista.\n"
-                            "2. NO inventes lugares, rutas ni datos.\n"
-                            "3. Si el usuario pide algo fuera de la lista, responde exactamente: "
-                            "'No tengo información de ese lugar dentro del mapa actual.'\n"
-                            "4. Responde siempre en español.\n"
-                            "5. Responde de forma breve, clara y natural.\n"
-                            "6. No agregues encabezados, etiquetas, notas internas ni símbolos extraños.\n"
-                            "7. Si el usuario pide recomendaciones, elige solo de la lista.\n"
-                            "8. Si el usuario pide una ruta, arma la ruta solo con lugares de la lista.\n"
-                            "9. No escribas símbolos como ## ni instrucciones internas.\n"
-                            "10. Si preguntan qué lugares hay disponibles, enumera únicamente los nombres."
-                        )
+                        "content": system_prompt
                     },
                     {
                         "role": "user",
                         "content": message
                     }
                 ],
-                "stream": False,
-                "keep_alive": "10m",
-                "options": {
-                    "temperature": 0.2,
-                    "num_predict": 120
-                }
-            }
-
-            ollama_response = requests.post(
-                "http://https://back-nexo.onrender.com:11434/api/chat",
-                json=payload,
-                timeout=180
+                temperature=0.3,
+                max_output_tokens=220
             )
-            ollama_response.raise_for_status()
 
-            data = ollama_response.json()
-            reply = data.get("message", {}).get("content", "").strip()
-
-            # Limpieza de texto basura del modelo
-            if "##" in reply:
-                reply = reply.split("##")[0].strip()
-
-            frases_bloqueadas = [
-                "Instrucción",
-                "restricciones",
-                "Eres NEXO",
-            ]
-
-            for frase in frases_bloqueadas:
-                if frase in reply:
-                    reply = reply.split(frase)[0].strip()
+            reply = (response.output_text or "").strip()
 
             if not reply:
                 reply = "No pude generar una respuesta clara en este momento."
 
-            return Response({"reply": reply}, status=status.HTTP_200_OK)
+            blocked_fragments = [
+                "Eres NEXO",
+                "REGLAS",
+                "LUGARES DISPONIBLES",
+                "instrucciones internas"
+            ]
 
-        except requests.exceptions.RequestException as e:
-            print("ERROR DE CONEXIÓN CON OLLAMA:", repr(e))
+            for fragment in blocked_fragments:
+                if fragment in reply:
+                    reply = reply.split(fragment)[0].strip()
+
+            if not reply:
+                reply = "Puedo ayudarte a conocer los lugares disponibles dentro de NEXO."
+
             return Response(
-                {"reply": "No pude conectarme con el motor de IA local."},
+                {"reply": reply},
                 status=status.HTTP_200_OK
             )
+
         except Exception as e:
             print("ERROR GENERAL DEL CHATBOT:", repr(e))
+
             return Response(
-                {"reply": "Error en el servidor."},
+                {
+                    "reply": (
+                        "El asistente no pudo responder en este momento. "
+                        "Intenta nuevamente en unos segundos."
+                    )
+                },
                 status=status.HTTP_200_OK
             )
