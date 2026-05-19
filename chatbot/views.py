@@ -141,7 +141,27 @@ class ChatbotView(APIView):
             )
 
         except Exception as e:
-            print("ERROR GENERAL DEL CHATBOT:", repr(e))
+            error_text = repr(e)
+            print("ERROR GENERAL DEL CHATBOT:", error_text)
+
+            if "insufficient_quota" in error_text or "RateLimitError" in error_text:
+                places = Place.objects.all()
+
+                if places.exists():
+                    place_names = [place.name for place in places[:6]]
+
+                    return Response(
+                        {
+                            "reply": (
+                                "En este momento el asistente de IA avanzada no tiene cuota disponible, "
+                                "pero puedo ayudarte con los lugares cargados en NEXO. "
+                                "Te recomiendo explorar: "
+                                + ", ".join(place_names)
+                                + "."
+                            )
+                        },
+                        status=status.HTTP_200_OK
+                    )
 
             return Response(
                 {
