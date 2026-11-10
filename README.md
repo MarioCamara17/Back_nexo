@@ -86,6 +86,55 @@ La API proporciona los siguientes endpoints:
 
 Todos los endpoints utilizan el prefijo `/api/v1/` y siguen los estándares REST para las operaciones CRUD.
 
+### Lugares cercanos (radio en kilómetros)
+
+```http
+GET /api/v1/places/nearby/?latitude=18.00204&longitude=-92.93411&radius_km=10
+```
+
+Parámetros:
+
+| Parámetro | Obligatorio | Descripción |
+| --- | --- | --- |
+| `latitude` | Sí | Latitud del centro de búsqueda (-90 a 90). |
+| `longitude` | Sí | Longitud del centro de búsqueda (-180 a 180). |
+| `radius_km` | No | Radio entre 0.5 y 100 km. Por defecto 5. |
+| `category` | No | Nombre exacto de la categoría. |
+| `municipality` | No | Nombre exacto del municipio. |
+| `search` | No | Texto libre sobre nombre, descripción, municipio o categoría. |
+| `limit` | No | Máximo de resultados (1 a 100). Por defecto 50. |
+
+La respuesta incluye `center`, `radius_km`, `count` y `results`. Cada resultado
+agrega `distance_km`, calculada con la fórmula de Haversine. **Las distancias son
+en línea recta, no recorridos por carretera ni tiempos reales.**
+
+### Asistente conversacional NEXO
+
+```http
+POST /api/chat/
+Content-Type: application/json
+
+{
+  "message": "¿Qué hay cerca de mí?",
+  "latitude": 18.00204,
+  "longitude": -92.93411,
+  "radius_km": 10,
+  "session_id": "opcional-uuid-de-la-conversacion"
+}
+```
+
+El asistente acepta preguntas libres y conserva memoria de la conversación
+(último lugar consultado, radio y contexto). También mantiene compatibilidad con
+las intenciones antiguas mediante el campo `intent`.
+
+- `GET /api/chat/` — saludo inicial y menú de sugerencias. Acepta `session_id`.
+- `POST /api/chat/` — envía un mensaje libre o una intención.
+- `DELETE /api/chat/?session_id=...` — borra la conversación y su historial.
+
+La respuesta contiene `reply`, `kind`, `places`, `actions`, `suggestions`,
+`meta`, `session_id`, `context` y `agent`. Las acciones permiten abrir el mapa,
+filtrar por categoría, mostrar lugares, armar un recorrido o pedir indicaciones.
+
 ## Panel de administración
 El panel de administración de Django está disponible en `/admin/`. Necesitarás haber creado un superusuario para acceder.
 

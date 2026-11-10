@@ -1,17 +1,17 @@
+import logging
 import math
 from uuid import UUID
-
-from django.db.models import Count
 
 from rest_framework import serializers
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from places.models import Place, Category
+from .agent import NexoAgent, AgentError
+from .models import ChatMessage, ChatSession
 
-from .content import LEGENDS, RECOMMENDED_IDS
-from .engine import nearby
+
+logger = logging.getLogger(__name__)
 
 
 MENU = [
@@ -67,9 +67,16 @@ MENU = [
 
 
 class ChatRequest(serializers.Serializer):
+    message = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=1200,
+    )
+
     intent = serializers.ChoiceField(
         choices=[item["id"] for item in MENU] + ["menu"],
-        default="menu",
+        required=False,
+        allow_blank=True,
     )
 
     place_id = serializers.UUIDField(required=False)
@@ -87,10 +94,20 @@ class ChatRequest(serializers.Serializer):
     )
 
     radius_km = serializers.FloatField(
-        min_value=0.1,
+        min_value=0.5,
         max_value=100,
-        default=5,
+        required=False,
     )
+
+    minutes = serializers.IntegerField(
+        min_value=1,
+        max_value=1440,
+        required=False,
+    )
+
+    session_id = serializers.UUIDField(required=False)
+
+    context = serializers.JSONField(required=False)
 
     def validate(self, attrs):
         for field in ("latitude", "longitude", "radius_km"):
@@ -99,359 +116,159 @@ class ChatRequest(serializers.Serializer):
                     field: "Introduce un número finito."
                 })
 
+        if not (attrs.get("message") or "").strip() and not attrs.get("intent"):
+            raise serializers.ValidationError({
+                "message": "Escribe una consulta o selecciona una opción."
+            })
+
         return attrs
 
 
-def place_data(place):
-    return {
-        "id": str(place.pk),
-        "name": place.name,
-        "latitude": str(place.latitude),
-        "longitude": str(place.longitude),
-        "category": place.category.name,
-    }
-
-
-def format_duration(duration):
-    if not duration:
-        return "Duración no registrada"
-
-    if not (duration.hour or duration.minute or duration.second):
-        return "Duración no registrada"
-
-    text = f"{duration.hour} h {duration.minute} min"
-
-    if duration.second:
-        text += f" {duration.second} s"
-
-    return text
-
-
 class ChatbotView(APIView):
-    # Consultas públicas de información turística.
-    # Guardar favoritos y rutas sigue utilizando sus APIs autenticadas.
+    """Consultas públicas de información turística.
+
+    El asistente acepta tanto preguntas libres (``message``) como las
+    intenciones predefinidas del menú antiguo (``intent``). Guardar
+    favoritos y rutas sigue utilizando sus APIs autenticadas.
+    """
+
     permission_classes = [AllowAny]
 
     def get(self, request):
-        return Response({
-            "reply": "Selecciona una pregunta para comenzar.",
-            "menu": MENU,
-        })
+        session_id = self._parse_uuid(request.query_params.get("session_id"))
+        session = self._get_session(request, session_id)
+        result = NexoAgent(
+            session,
+            request,
+            {"message": "", "intent": "menu"},
+        ).respond()
+        result["menu"] = MENU
+
+        if request.query_params.get("history") in {"1", "true", "yes"}:
+            result["history"] = self._history(session)
+
+        return Response(result)
 
     def post(self, request):
         serializer = ChatRequest(data=request.data)
         serializer.is_valid(raise_exception=True)
-
         data = serializer.validated_data
-        intent = data["intent"]
 
-        if intent == "menu":
-            return self.get(request)
+        session = self._get_session(request, data.get("session_id"))
+        message_text = (data.get("message") or "").strip()
+        intent = data.get("intent") or ""
 
-        places = Place.objects.select_related(
-            "category",
-            "route",
-        ).order_by("name", "pk")
+        ChatMessage.objects.create(
+            session=session,
+            role=ChatMessage.ROLE_USER,
+            content=message_text or intent,
+            intent=intent,
+            payload={
+                "intent": intent,
+                "latitude": data.get("latitude"),
+                "longitude": data.get("longitude"),
+                "radius_km": data.get("radius_km"),
+                "place_id": str(data["place_id"]) if data.get("place_id") else None,
+            },
+        )
 
-        result = {
-            "reply": "",
-            "places": [],
-            "actions": [],
-        }
-
-        # 1. Lugares cercanos.
-        if intent == "nearby":
-            self.require_location(data)
-
-            close_places = nearby(
-                [place_data(place) for place in places],
-                data["latitude"],
-                data["longitude"],
-                data["radius_km"],
-            )
-
-            result["places"] = close_places
-
-            if close_places:
-                result["reply"] = (
-                    f"Lugares dentro de {data['radius_km']:g} km "
-                    "de tu ubicación, ordenados por cercanía. "
-                    "Las distancias se miden en línea recta."
-                )
-
-                result["actions"] = [{
-                    "type": "places",
-                    "label": "Ver lugares cercanos en el mapa",
-                    "place_ids": [
-                        place["id"] for place in close_places
-                    ],
-                }]
-            else:
-                result["reply"] = (
-                    "No hay lugares registrados dentro de ese radio. "
-                    "Selecciona un radio mayor y vuelve a consultar."
-                )
-
-        # 2. Destacados editoriales o popularidad por visitas.
-        elif intent == "popular":
-            editorial = {}
-
-            for index, place_id in enumerate(RECOMMENDED_IDS):
-                try:
-                    valid_id = str(UUID(str(place_id)))
-                except (ValueError, TypeError, AttributeError):
-                    continue
-
-                editorial[valid_id] = index
-
-            chosen = (
-                list(places.filter(pk__in=editorial.keys()))
-                if editorial
-                else []
-            )
-
-            if chosen:
-                chosen.sort(
-                    key=lambda place: editorial[str(place.pk)]
-                )
-
-                result["reply"] = (
-                    "Estos son los lugares destacados "
-                    "por la selección editorial de NEXO."
-                )
-            else:
-                chosen = list(
-                    places.annotate(
-                        visit_count=Count(
-                            "visits",
-                            distinct=True,
-                        )
-                    )
-                    .filter(visit_count__gt=0)
-                    .order_by("-visit_count", "name", "pk")[:5]
-                )
-
-                if chosen:
-                    result["reply"] = (
-                        "Estos son los lugares con más "
-                        "visitas registradas en NEXO."
-                    )
-                else:
-                    result["reply"] = (
-                        "Todavía no hay destacados configurados "
-                        "ni visitas registradas para calcular "
-                        "la popularidad."
-                    )
-
-            result["places"] = [
-                place_data(place) for place in chosen[:5]
-            ]
-
-        # 3. Lugares cercanos y duración de sus rutas completas.
-        # No filtra por el tiempo disponible del turista.
-        elif intent == "itinerary":
-            self.require_location(data)
-
-            catalog = list(places)
-
-            places_by_id = {
-                str(place.pk): place
-                for place in catalog
-            }
-
-            close_places = nearby(
-                [place_data(place) for place in catalog],
-                data["latitude"],
-                data["longitude"],
-                data["radius_km"],
-            )
-
-            result["places"] = close_places
-
-            if not close_places:
-                result["reply"] = (
-                    "No hay lugares registrados dentro de ese radio. "
-                    "Selecciona un radio mayor y vuelve a consultar."
-                )
-            else:
-                groups = {}
-
-                for item in close_places:
-                    route = places_by_id[item["id"]].route
-                    route_id = str(route.pk)
-
-                    if route_id not in groups:
-                        groups[route_id] = {
-                            "route": route,
-                            "places": [],
-                        }
-
-                    groups[route_id]["places"].append(item)
-
-                lines = [
-                    (
-                        f"Estos son los lugares cercanos dentro de "
-                        f"{data['radius_km']:g} km."
-                    ),
-                    (
-                        "Las distancias se miden en línea recta. "
-                        "No se filtran por tu tiempo disponible."
-                    ),
-                    (
-                        "Las duraciones corresponden a las rutas "
-                        "completas registradas en NEXO, no al tiempo "
-                        "de visita de estos lugares ni al traslado "
-                        "desde tu ubicación."
-                    ),
-                ]
-
-                for group in groups.values():
-                    route = group["route"]
-                    duration_text = format_duration(route.duration)
-
-                    lines.append(
-                        f"\n{route.name} · "
-                        f"Ruta completa: {duration_text}"
-                    )
-
-                    for item in group["places"]:
-                        lines.append(
-                            f"• {item['name']} · "
-                            f"{item['distance_km']:g} km"
-                        )
-
-                    result["actions"].append({
-                        "type": "places",
-                        "label": (
-                            f"Ver lugares cercanos de {route.name}"
-                        ),
-                        "place_ids": [
-                            item["id"]
-                            for item in group["places"]
-                        ],
-                    })
-
-                result["reply"] = "\n".join(lines)
-
-        # 4. Filtros del mapa.
-        elif intent == "filter":
-            categories = Category.objects.order_by("name")
-
-            result["reply"] = (
-                "Selecciona una categoría para mostrar "
-                "sus lugares en el mapa."
-            )
-
-            result["actions"] = [
+        try:
+            result = NexoAgent(session, request, data).respond()
+        except AgentError as exc:
+            return Response(exc.detail, status=exc.status_code)
+        except Exception:
+            logger.exception("Error inesperado del asistente NEXO")
+            return Response(
                 {
-                    "type": "filter",
-                    "label": category.name,
-                    "category": category.name,
-                }
-                for category in categories
-            ]
-
-            if not result["actions"]:
-                result["reply"] = (
-                    "Todavía no hay categorías registradas."
-                )
-
-        # 5. Ayuda para favoritos y recorridos.
-        elif intent == "favorites":
-            result["reply"] = (
-                "Para guardar un lugar, abre su ficha y pulsa "
-                "el botón de favoritos. Después puedes consultarlo "
-                "en la sección Favoritos.\n\n"
-                "Para guardar un recorrido, abre el mapa, pulsa "
-                "Crear ruta óptima, agrega al menos dos lugares "
-                "y pulsa Guardar.\n\n"
-                "Los recorridos se guardan como rutas personalizadas."
-            )
-
-            result["actions"] = [
-                {
-                    "type": "favorites",
-                    "label": "Abrir favoritos",
+                    "reply": (
+                        "Tuve un problema interno al preparar la respuesta. "
+                        "Vuelve a intentarlo en un momento."
+                    ),
+                    "kind": "error",
+                    "places": [],
+                    "actions": [],
+                    "suggestions": [],
+                    "session_id": str(session.pk),
                 },
-                {
-                    "type": "map",
-                    "label": "Crear recorrido",
-                },
-            ]
+                status=500,
+            )
 
-        # Preguntas sobre un lugar específico.
-        else:
-            if "place_id" not in data:
-                raise serializers.ValidationError({
-                    "place_id": "Selecciona un lugar de interés."
-                })
-
-            place = places.filter(
-                pk=data["place_id"]
-            ).first()
-
-            if place is None:
-                return Response(
-                    {
-                        "reply": "Este lugar ya no está disponible.",
-                        "places": [],
-                        "actions": [],
-                    },
-                    status=404,
-                )
-
-            result["places"] = [place_data(place)]
-
-            # 6. Historia.
-            if intent == "history":
-                result["reply"] = (
-                    place.history
-                    or "Este lugar todavía no tiene historia registrada."
-                )
-
-            # 7. Datos curiosos o leyendas.
-            elif intent == "legends":
-                result["reply"] = (
-                    LEGENDS.get(str(place.pk))
-                    or (
-                        "Todavía no hay datos curiosos "
-                        "o leyendas registrados para este lugar."
-                    )
-                )
-
-            # 8. Horarios y costos.
-            elif intent == "logistics":
-                result["reply"] = (
-                    f"Horario: {place.schedule or 'No registrado'}.\n"
-                    f"Entrada: {place.cost or 'No registrada'}.\n\n"
-                    "Son los datos registrados en NEXO. "
-                    "Confirma su vigencia con el lugar "
-                    "antes de visitarlo."
-                )
-
-            # 9. Cómo llegar.
-            elif intent == "directions":
-                result["reply"] = (
-                    "Pulsa Trazar desde mi ubicación. "
-                    "El mapa solicitará permiso de ubicación "
-                    "y consultará un recorrido por carretera. "
-                    "No es una ruta peatonal ni garantiza accesibilidad."
-                )
-
-                result["actions"] = [{
-                    "type": "directions",
-                    "label": "Trazar desde mi ubicación",
-                    "place_id": str(place.pk),
-                }]
+        ChatMessage.objects.create(
+            session=session,
+            role=ChatMessage.ROLE_ASSISTANT,
+            content=result.get("reply", ""),
+            intent=str(result.get("meta", {}).get("intent", ""))[:40],
+            payload=result,
+        )
 
         return Response(result)
 
+    def delete(self, request):
+        session_id = self._parse_uuid(
+            request.query_params.get("session_id")
+            or request.data.get("session_id")
+        )
+
+        if session_id is None:
+            return Response(
+                {"detail": "Indica el identificador de la conversación."},
+                status=400,
+            )
+
+        session = ChatSession.objects.filter(pk=session_id).first()
+
+        if session is None:
+            return Response(status=204)
+
+        if session.user_id and (
+            not request.user.is_authenticated
+            or session.user_id != request.user.pk
+        ):
+            return Response(status=403)
+
+        session.delete()
+        return Response(status=204)
+
     @staticmethod
-    def require_location(data):
-        if "latitude" not in data or "longitude" not in data:
-            raise serializers.ValidationError({
-                "location": (
-                    "Comparte tu ubicación para buscar "
-                    "lugares cercanos."
-                )
-            })
+    def _parse_uuid(value) -> UUID | None:
+        if not value:
+            return None
+        try:
+            return UUID(str(value))
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+    def _get_session(self, request, session_id: UUID | None) -> ChatSession:
+        user = request.user if request.user.is_authenticated else None
+
+        if session_id is not None:
+            session = ChatSession.objects.filter(pk=session_id).first()
+
+            if session is not None:
+                if session.user_id and (
+                    user is None or session.user_id != user.pk
+                ):
+                    # No se reutiliza una conversación de otra cuenta.
+                    return ChatSession.objects.create(user=user)
+
+                if user is not None and session.user_id is None:
+                    session.user = user
+                    session.save(update_fields=["user", "updated_at"])
+
+                return session
+
+            return ChatSession.objects.create(pk=session_id, user=user)
+
+        return ChatSession.objects.create(user=user)
+
+    @staticmethod
+    def _history(session: ChatSession) -> list[dict]:
+        return [
+            {
+                "role": message.role,
+                "content": message.content,
+                "intent": message.intent,
+                "created_at": message.created_at.isoformat(),
+            }
+            for message in session.messages.all()[:30]
+        ]

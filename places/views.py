@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
-from rest_framework import viewsets, permissions, filters
+import math
+
+from rest_framework import viewsets, permissions, filters, serializers
 from rest_framework.response import Response
 from rest_framework import status
 from django.shortcuts import get_object_or_404
 from django.db import IntegrityError
+from django.db.models import Q
 from .models import State, Municipality, Category, Place, Favorite, VisitedPlace
+from .geo import bounding_box, distance_km, valid_coordinates
 from .serializers import (
     StateSerializer, 
     MunicipalitySerializer, 
@@ -20,6 +24,36 @@ from rest_framework.decorators import action
 from django.utils import timezone
 
 User = get_user_model()
+
+
+class NearbyQuerySerializer(serializers.Serializer):
+    latitude = serializers.FloatField(min_value=-90, max_value=90)
+    longitude = serializers.FloatField(min_value=-180, max_value=180)
+    radius_km = serializers.FloatField(
+        min_value=0.5,
+        max_value=100,
+        required=False,
+        default=5,
+    )
+    category = serializers.CharField(required=False, allow_blank=True)
+    municipality = serializers.CharField(required=False, allow_blank=True)
+    search = serializers.CharField(required=False, allow_blank=True)
+    limit = serializers.IntegerField(
+        min_value=1,
+        max_value=100,
+        required=False,
+        default=50,
+    )
+
+    def validate(self, attrs):
+        for field in ("latitude", "longitude", "radius_km"):
+            value = attrs.get(field)
+            if value is not None and not math.isfinite(value):
+                raise serializers.ValidationError({
+                    field: "Introduce un número finito."
+                })
+        return attrs
+
 
 
 class IsAdminUserOrReadOnly(permissions.BasePermission):
@@ -73,6 +107,97 @@ class PlaceViewSet(viewsets.ModelViewSet):
         'route__id'
     ]
     pagination_class = None
+
+    @action(detail=False, methods=['get'], url_path='nearby')
+    def nearby(self, request):
+        """Lugares dentro de un radio, ordenados por distancia geodésica.
+
+        Parámetros: latitude, longitude, radius_km, category, municipality,
+        search y limit. La distancia es en línea recta, no por carretera.
+        """
+        serializer = NearbyQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        latitude = data['latitude']
+        longitude = data['longitude']
+        radius_km = data.get('radius_km', 5)
+        limit = data.get('limit', 50)
+
+        bounds = bounding_box(latitude, longitude, radius_km)
+        if bounds is None:
+            return Response(
+                {'detail': 'Coordenadas o radio inválidos.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        min_lat, max_lat, min_lng, max_lng = bounds
+
+        queryset = (
+            self.get_queryset()
+            .select_related('category', 'municipality', 'route')
+            .filter(
+                latitude__gte=min_lat,
+                latitude__lte=max_lat,
+                longitude__gte=min_lng,
+                longitude__lte=max_lng,
+            )
+        )
+
+        category = (data.get('category') or '').strip()
+        municipality = (data.get('municipality') or '').strip()
+        search = (data.get('search') or '').strip()
+
+        if category:
+            queryset = queryset.filter(category__name__iexact=category)
+        if municipality:
+            queryset = queryset.filter(municipality__name__iexact=municipality)
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search)
+                | Q(description__icontains=search)
+                | Q(municipality__name__icontains=search)
+                | Q(category__name__icontains=search)
+            )
+
+        results = []
+
+        for place in queryset:
+            if not valid_coordinates(place.latitude, place.longitude):
+                continue
+
+            try:
+                distance = distance_km(
+                    latitude,
+                    longitude,
+                    place.latitude,
+                    place.longitude,
+                )
+            except ValueError:
+                continue
+
+            if distance > radius_km:
+                continue
+
+            payload = PlaceSerializer(
+                place,
+                context={'request': request},
+            ).data
+            payload['distance_km'] = round(distance, 2)
+            results.append((distance, payload))
+
+        results.sort(key=lambda item: (item[0], item[1]['name'].casefold()))
+        payloads = [item[1] for item in results[:limit]]
+
+        return Response({
+            'center': {
+                'latitude': latitude,
+                'longitude': longitude,
+            },
+            'radius_km': radius_km,
+            'count': len(payloads),
+            'results': payloads,
+        })
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def toggle_visited(self, request, pk=None):
