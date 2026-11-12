@@ -30,11 +30,11 @@ POINT_RULES = {
         'points': 5,
         'description': 'Usaste el chatbot para recibir una recomendación'
     },
-    'ar_experience': {
-        'points': 80,
-        'description': 'Visualizaste una experiencia de realidad aumentada'
-    },
 }
+
+
+TOP_LEVEL_POINTS = 1000
+TOP_LEVEL_NAME = "Embajador de Tabasco"
 
 
 LEVELS = [
@@ -56,11 +56,11 @@ LEVELS = [
     {
         'name': 'Guía regional',
         'min_points': 600,
-        'next_points': 1000
+        'next_points': TOP_LEVEL_POINTS
     },
     {
-        'name': 'Maestro explorador',
-        'min_points': 1000,
+        'name': TOP_LEVEL_NAME,
+        'min_points': TOP_LEVEL_POINTS,
         'next_points': None
     },
 ]
@@ -102,12 +102,19 @@ def build_badges(user, total_points):
         action='chatbot_use'
     ).count()
 
-    ar_count = PointTransaction.objects.filter(
+    station_count = PointTransaction.objects.filter(
         user=user,
-        action='ar_experience'
+        action='visited_station'
     ).count()
 
     return [
+        {
+            'icon': '🏆',
+            'name': TOP_LEVEL_NAME,
+            'description': f'Alcanza {TOP_LEVEL_POINTS} Chocopuntos.',
+            'unlocked': total_points >= TOP_LEVEL_POINTS,
+            'is_top_level': True,
+        },
         {
             'icon': '📍',
             'name': 'Primer destino',
@@ -145,16 +152,10 @@ def build_badges(user, total_points):
             'unlocked': chatbot_count >= 1
         },
         {
-            'icon': '👓',
-            'name': 'Explorador RA',
-            'description': 'Visualiza una experiencia de realidad aumentada.',
-            'unlocked': ar_count >= 1
-        },
-        {
-            'icon': '🏆',
-            'name': 'Embajador de Tabasco',
-            'description': 'Alcanza 1000 puntos dentro de NEXO.',
-            'unlocked': total_points >= 1000
+            'icon': '🚉',
+            'name': 'Primera estación',
+            'description': 'Confirma con tu ubicación la visita a una estación del Tren Maya.',
+            'unlocked': station_count >= 1
         },
     ]
 
